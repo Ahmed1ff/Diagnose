@@ -4,52 +4,61 @@ import requests
 from dotenv import load_dotenv
 import os
 
+# Load environment variables
 load_dotenv()
+
 app = FastAPI()
 
 AZURE_API_KEY = os.getenv("AZURE_API_KEY")
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 
+# Request schema
 class DiagnosisRequest(BaseModel):
-    symptoms: str  
+    symptoms: str
+
+# Language detection
 def detect_language(text: str) -> str:
-    arabic_chars = [c for c in text if '\u0600' <= c <= '\u06FF']
-    return "ar" if len(arabic_chars) > 5 else "en"
+    arabic_count = sum(1 for c in text if '\u0600' <= c <= '\u06FF')
+    english_count = sum(1 for c in text if c.isascii() and c.isalpha())
+
+    print("🔍 Detected Arabic count:", arabic_count)
+    print("🔍 Detected English count:", english_count)
+
+    if arabic_count > 0 and english_count > 0:
+        return "ar"  # Mixed input → force Arabic
+    elif arabic_count > english_count:
+        return "ar"
+    elif english_count > arabic_count:
+        return "en"
+    return "ar"  # Default
+
+
+# GPT call
 def call_azure_gpt(symptoms: str):
     language = detect_language(symptoms)
 
-    if language == "ar":
-       if language == "ar":
-         system_prompt = (
-        "أنت طبيب بشري محترف. عندما يكتب المستخدم أعراضًا صحية، قم بإرجاع الرد بهذا الشكل بالضبط:\n\n"
-        "التشخيص المبدئي: [اكتب كل التشخيصات المحتملة في سطر واحد فقط، مفصولة بفواصل (،) بدون أي رموز أو قوائم أو سطور جديدة. لا تبدأ بـ 'قد يكون']\n"
-        "التخصص المقترح: [اكتب التخصص الطبي الأكثر دقة حسب الأعراض مثل 'أنف وأذن وحنجرة' أو 'أعصاب' أو 'أمراض جلدية'. لا تذكر تخصصات عامة مثل 'طب الأسرة']\n"
-        "نصيحة: [اكتب جملة واحدة فقط في نفس السطر، مباشرة وواضحة بدون 'يُفضل' أو 'قد'. لا تبدأ سطر جديد ولا تستخدم رموز أو تنقيط.]\n\n"
-        "❗ إذا كتب المستخدم شيئًا لا علاقة له بالأعراض الصحية، أجب بهذه الجملة فقط:\n"
-        "'من فضلك أدخل أعراضًا صحية فقط للحصول على التشخيص.'\n\n"
-        "مهم جدًا:\n"
-        "- كل جزء يجب أن يكون في **سطر واحد فقط**.\n"
-        "- لا تستخدم رموز مثل (-) أو (•).\n"
-        "- لا تستخدم نقاط أو قوائم أو أي مقدمة تفسيرية.\n"
-        "- الرد كله يجب أن يكون باللغة العربية فقط.\n"
-    )
+    system_prompt = f"""
+You are a professional medical doctor who understands both Arabic and English.
+When the user provides symptoms, respond in ONLY one language — the dominant language used in the symptoms.
+Dominant language: {language}
 
+If responding in Arabic:
+ التشخيص المبدئي: [اكتب كل التشخيصات المحتملة في سطر واحد فقط، مفصولة بفواصل (،)، بدون 'قد يكون']
+ التخصص المقترح: [اكتب تخصصًا طبيًا دقيقًا مثل 'أمراض باطنية' أو 'أعصاب']
 
-    else:
-        system_prompt = (
-        "You are a professional medical doctor. When the user provides symptoms, respond in this exact strict format:\n\n"
-        "Preliminary Diagnosis: [List all possible diagnoses in a **single line**, separated by commas (,) with no bullets, no symbols, and no line breaks. Do not start with 'Possible' or 'May be']\n"
-        "Suggested Specialty: [State the most accurate and specific medical specialty like 'ENT', 'Neurology', or 'Dermatology'. Do not say 'Family Medicine']\n"
-        "Advice: [Write **one direct sentence** in the same line, no 'consider' or 'might'. No line breaks, symbols, or bullet points.]\n\n"
-        "❗ If the user enters non-medical input, respond only with:\n"
-        "'Please enter only medical symptoms to get a diagnosis.'\n\n"
-        "Strict formatting rules:\n"
-        "- Each section must be on one line only.\n"
-        "- No symbols like (-), (•), or numbering.\n"
-        "- No vague or general specialties.\n"
-        "- The entire response must be written in English only.\n"
-    )
+If responding in English:
+ Preliminary Diagnosis: [List all possible diagnoses in one line, separated by commas. Do not use 'possible']
+ Suggested Specialty: [Provide a specific specialty like 'Neurology' or 'Cardiology']
 
+❗ If the input is unrelated to medical symptoms, reply ONLY with:
+- ' أدخل أعراضًا صحية فقط للحصول على التشخيص.' IF Arabic
+- ' enter only medical symptoms to get a diagnosis.' IF English
+
+Strict rules:
+- Use ONLY the dominant language in reply
+- Use EXACTLY two lines — no more, no less
+- NO symbols, NO names, NO mixing of Arabic and English
+"""
 
 
     headers = {
@@ -58,50 +67,34 @@ def call_azure_gpt(symptoms: str):
     }
 
     body = {
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": symptoms}
-        ],
-        "temperature": 0.5,
-        "max_tokens": 400
-    }
+  "messages": [
+    {"role": "system", "content": system_prompt},
+    {"role": "user", "content": symptoms.strip()}
+  ],
+  "temperature": 0,
+  "max_tokens": 400
+}
 
     response = requests.post(AZURE_OPENAI_ENDPOINT, headers=headers, json=body)
     response.raise_for_status()
     return response.json()["choices"][0]["message"]["content"]
-
-# 👇 دالة تفصل الرد إلى حقول منفصلة
-def parse_gpt_response(response_text: str):
-    lines = response_text.strip().split("\n")
-    result = {"diagnosis": "", "specialty": "", "advice": ""}
-
-    for line in lines:
-        if "التشخيص المبدئي" in line:
-            result["diagnosis"] = line.split(":", 1)[1].strip()
-        elif "التخصص المقترح" in line:
-            result["specialty"] = line.split(":", 1)[1].strip()
-        elif "نصيحة" in line:
-            result["advice"] = line.split(":", 1)[1].strip()
-        elif "Preliminary Diagnosis" in line:
-            result["diagnosis"] = line.split(":", 1)[1].strip()
-        elif "Suggested Specialty" in line:
-            result["specialty"] = line.split(":", 1)[1].strip()
-        elif "Advice" in line:
-            result["advice"] = line.split(":", 1)[1].strip()
-
-    return result
 
 @app.post("/diagnose")
 async def diagnose(req: DiagnosisRequest):
     try:
         reply = call_azure_gpt(req.symptoms)
 
-        # لو المستخدم كتب حاجة غير أعراض، هنرجع الرد زي ما هو
-        if "من فضلك أدخل أعراضًا صحية فقط" in reply or "Please enter only medical symptoms" in reply:
+        if any(x in reply for x in [
+            "من فضلك أدخل أعراضًا صحية فقط",
+            "Please enter only medical symptoms"
+        ]):
             return {"message": reply}
 
-        parsed = parse_gpt_response(reply)
-        return parsed
+        banned_words = ["جيفارا", "مارادونا", "ترامب", "Messi", "Hitler"]
+        if any(word.lower() in reply.lower() for word in banned_words):
+            return {"error": "رد غير منطقي. يرجى إعادة كتابة الأعراض بشكل أوضح."}
+
+        return {"result": reply}
 
     except Exception as e:
         return {"error": str(e)}
